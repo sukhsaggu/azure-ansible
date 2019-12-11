@@ -1,0 +1,62 @@
+---
+- name: Create an instance
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: create an instance
+      azure_rm_virtualmachine:
+        profile: "{{ azure_profile_name }}"
+        resource_group: ansible
+        name: "{{ vm_name }}"
+        vm_size: Standard_B1s
+        admin_username: azure-user
+        ssh_password_enabled: false
+        ssh_public_keys:
+          - path: '/home/azure-user/.ssh/authorized_keys'
+            key_data: "{{ lookup('file', '{{ ansible_ssh_public_key_file }}') }}"
+        image:
+          offer: RHEL
+          publisher: RedHat
+          sku: '8'
+          version: latest
+      register: new_azure_vm
+
+    - name: Wait for SSH to come up
+      wait_for: host={{ azure_vm.properties.networkProfile.networkInterfaces[0].properties.ipConfigurations[0].properties.publicIPAddress.properties.ipAddress }} port=22 delay=60 timeout=320
+      vars:
+        ansible_user: azure-user
+        #ansible_ssh_private_key_file:
+
+    - name: Add host to groupname
+      add_host: hostname={{ azure_vm.properties.networkProfile.networkInterfaces[0].properties.ipConfigurations[0].properties.publicIPAddress.properties.ipAddress }} groupname=new_instances
+
+- name: run some tasks on the new instance
+  hosts: new_instances
+  gather_facts: true
+  vars:
+    ansible_user: azure-user
+    #ansible_ssh_private_key_file:
+  tasks:
+    - name: connect to the new instance
+      setup:
+
+    - name: print the new instance facts
+      debug:
+        msg: "{{ ansible_facts }}"
+
+    - name: reboot
+      reboot:
+        msg: rebooted by ansible
+      become: yes #need to become otherwise this task will fail
+
+- name: terminate instances
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: terminate instances that were previously launched
+      azure_rm_virtualmachine:
+        profile: "{{ azure_profile_name }}"
+        resource_group: ansible
+        name: "{{ vm_name }}"
+        remove_on_absent: all_autocreated
+        state: absent

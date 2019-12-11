@@ -1,0 +1,90 @@
+---
+- name: Create an instance
+  hosts: localhost
+  gather_facts: no
+  vars:
+    winrm_enable_script: SQBuAHYAbwBrAGUALQBFAHgAcAByAGUAcwBzAGkAbwBuACAALQBDAG8AbQBtAGEAbgBkACAAKAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABTAHkAcwB0AGUAbQAuAE4AZQB0AC4AVwBlAGIAQwBsAGkAZQBuAHQAKQAuAEQAbwB3AG4AbABvAGEAZABTAHQAcgBpAG4AZwAoACcAaAB0AHQAcABzADoALwAvAHIAYQB3AC4AZwBpAHQAaAB1AGIAdQBzAGUAcgBjAG8AbgB0AGUAbgB0AC4AYwBvAG0ALwBhAG4AcwBpAGIAbABlAC8AYQBuAHMAaQBiAGwAZQAvAGQAZQB2AGUAbAAvAGUAeABhAG0AcABsAGUAcwAvAHMAYwByAGkAcAB0AHMALwBDAG8AbgBmAGkAZwB1AHIAZQBSAGUAbQBvAHQAaQBuAGcARgBvAHIAQQBuAHMAaQBiAGwAZQAuAHAAcwAxACcAKQApADsAIABFAG4AYQBiAGwAZQAtAFcAUwBNAGEAbgBDAHIAZQBkAFMAUwBQACAALQBSAG8AbABlACAAUwBlAHIAdgBlAHIAIAAtAEYAbwByAGMAZQA=
+
+  tasks:
+    - name: create an instance
+      azure_rm_virtualmachine:
+        profile: "{{ azure_profile_name }}"
+        resource_group: ansible
+        name: "{{ vm_name }}"
+        vm_size: Standard_B1s
+        admin_username: "{{ vm_admin_username }}"
+        admin_password: "{{ vm_admin_password }}"
+        image:
+          offer: WindowsServer
+          publisher: MicrosoftWindowsServer
+          sku: '2016-Datacenter'
+          version: latest
+        os_type: Windows
+      register: new_azure_vm
+
+    - name: create Azure vm extension to enable HTTPS WinRM listener
+      azure_rm_virtualmachine_extension:
+        profile: "{{ azure_profile_name }}"
+        name: winrm-extension
+        resource_group: ansible
+        virtual_machine_name: "{{ vm_name }}"
+        publisher: Microsoft.Compute
+        virtual_machine_extension_type: CustomScriptExtension
+        type_handler_version: 1.9
+        settings: '{"commandToExecute": "powershell.exe -ExecutionPolicy ByPass -EncodedCommand {{winrm_enable_script}}"}'
+        auto_upgrade_minor_version: true
+
+    - name: wait for winrm to come up
+      delegate_to: "{{ azure_vm.properties.networkProfile.networkInterfaces[0].properties.ipConfigurations[0].properties.publicIPAddress.properties.ipAddress }}"
+      wait_for_connection:
+        delay: 60
+        timeout: 600
+      vars:
+        ansible_user: "{{ vm_admin_username }}"
+        ansible_password: "{{ vm_admin_password }}"
+        ansible_connection: winrm
+        ansible_winrm_server_cert_validation: ignore
+        #ansible_winrm_transport:
+        #ansible_winrm_port:
+
+    - name: Add host to groupname
+      add_host: hostname={{ azure_vm.properties.networkProfile.networkInterfaces[0].properties.ipConfigurations[0].properties.publicIPAddress.properties.ipAddress }} groupname=new_instances
+
+- name: run some tasks on the new instance
+  hosts: new_instances
+  gather_facts: true
+  vars:
+    ansible_user: "{{ vm_admin_username }}"
+    ansible_password: "{{ vm_admin_password }}"
+    ansible_connection: winrm
+    ansible_winrm_server_cert_validation: ignore
+    #ansible_winrm_transport:
+    #ansible_winrm_port:
+  tasks:
+    - name: connect to the new instance
+      setup:
+
+    - name: print the new instance facts
+      debug:
+        msg: "{{ ansible_facts }}"
+
+    - name: reboot
+      win_reboot:
+        pre_reboot_delay: 2
+        post_reboot_delay: 0
+        test_command: whoami
+        reboot_timeout: 600
+        msg: Reboot initiated by Ansible
+        connect_timeout: 5
+
+- name: terminate instances
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: terminate instances that were previously launched
+      azure_rm_virtualmachine:
+        profile: "{{ azure_profile_name }}"
+        resource_group: ansible
+        name: "{{ vm_name }}"
+        remove_on_absent: all_autocreated
+        state: absent
